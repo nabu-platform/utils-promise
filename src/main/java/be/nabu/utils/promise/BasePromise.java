@@ -2,7 +2,12 @@ package be.nabu.utils.promise;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.WeakHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -15,6 +20,10 @@ import be.nabu.utils.promise.api.Promise;
 import be.nabu.utils.promise.api.SuccessHandler;
 
 public class BasePromise<T> implements Promise<T> {
+
+	private static volatile Thread promiseTimer;
+	private static volatile TimeOutWaiter waiter = new TimeOutWaiter();
+	
 	private CountDownLatch latch = new CountDownLatch(1);
 	private volatile T result;
 	private volatile Exception exception;
@@ -204,5 +213,59 @@ public class BasePromise<T> implements Promise<T> {
 			then(cancelHandler);
 		}
 		return this;
+	}
+
+	@Override
+	public Promise<T> timeout(long timeout, TimeUnit unit) {
+		waiter.timeouts.put(this, new Date(new Date().getTime() + TimeUnit.MILLISECONDS.convert(timeout, unit)));
+		if (promiseTimer == null) {
+			synchronized(BasePromise.class) {
+				if (promiseTimer == null) {
+					promiseTimer = new Thread(waiter);
+					promiseTimer.start();
+				}
+			}
+		}
+		return this;
+	}
+	
+	public static class TimeOutWaiter implements Runnable {
+		
+		Map<Promise<?>, Date> timeouts = Collections.synchronizedMap(new WeakHashMap<Promise<?>, Date>());
+		
+		@Override
+		public void run() {
+			while (true) {
+				Date now = new Date();
+				Iterator<Entry<Promise<?>, Date>> iterator = timeouts.entrySet().iterator();
+				Date earliest = null;
+				while (iterator.hasNext()) {
+					Entry<Promise<?>, Date> next = iterator.next();
+					Promise<?> promise = next.getKey();
+					// if the entry was cleared, remove it
+					if (promise == null) {
+						iterator.remove();
+					}
+					// it is timed out, cancel the promise
+					else if (next.getValue().before(now)) {
+						promise.cancel(true);
+						iterator.remove();
+					}
+					// get the earliest next promise to be timed out
+					else if (earliest == null || next.getValue().before(earliest)) {
+						earliest = next.getValue();
+					}
+				}
+				long sleepTime = earliest == null ? 60000 : earliest.getTime() - new Date().getTime();
+				if (sleepTime > 0) {
+					try {
+						Thread.sleep(sleepTime);
+					}
+					catch (InterruptedException e) {
+						// continue
+					}
+				}
+			}
+		}
 	}
 }
